@@ -1,0 +1,957 @@
+---
+title: "Forecasting the Cost of Thanksgiving Dinner Using R"
+author: "Jared Endicott"
+date: "January 22, 2016"
+output:
+  html_document:
+    keep_md: yes
+---
+
+<div style="width:450px; height=300px">
+![Image courtesy of iStock](ThanksgivingForecast2016_files\figure-html\iStock_000077928943_Small_ThanksgivingDinner2016.jpg)
+</div>
+
+#### Introduction
+
+In 2015 the cost of Thanksgiving Dinner rose above $50 for the first time ever. This was also the first time in the last five years that I had not attempted to predict what that price would be. Beginning in 2010 I wrote and posted a blog article each November in which I forecast the cost of the year after's Thanksgiving Dinner. However, I stopped writing my blog in 2014. Having skipped a year, it is my purpose here to revive this holiday tradition and attempt to forecast what the cost of Thanksgiving Dinner will be in 2016. 
+
+Each year the articles focused on a different topic related to Thanksgiving Dinner costs, discussing the economics of food prices, inflation, globalization, monetary policy, the impacts of weather and drought, forecasting methods and practices, and even my experiences visiting the country of Turkey for a forecasting workshop. This year I am sure to cover some of this familiar ground again, but the twist is that I will be applying a new skill to the analysis and forecasting of Thanksgiving Dinner. Over the last year I have been learning how to program using R for the <a href="https://www.coursera.org/specializations/jhu-data-science" target="_blank">Data Science Specialization through John Hopkins University on Coursera</a>. For those who don't know, R is an open source programming language that is especially useful for handling data analysis. This whole article, the text, data collection, charts, forecast models, html document, and all the rest, has been produced using R Studio. 
+
+The American Farm Bureau Federation (AFBF) has been measuring the cost of Thanksgiving Dinner through an informal price survey since 1986. Similar to the calculation of the consumer price index (CPI), although much smaller and simpler, the AFBF survey tracks the prices of goods in a market basket of traditional Thanksgiving Dinner items for feeding a gathering of 10 people. This market basket includes a 16-pount turkey, 1 gallon of milk, 3 lbs. or sweet potatoes, 30 oz. of pumpkin pie mix, 14 oz. of cube stuffing, 2 pie shells, 12 oz. of fresh cranberries, 12 rolls, ½ pint of whipping cream, 1 lb. of green peas, and a 1-pound relish tray of celery and carrots. Also miscellaneous items such as coffee, plus ingredients to prepare the meal, such as butter, evaporated milk, onions, eggs, sugar and flour ("Thanksgiving Dinner..."). The AFBF survey will be the basis of my analysis and forecast.
+
+```{r  xtable, echo=FALSE, warning=FALSE, message=FALSE}
+## load Packages
+library(XML); library(RCurl); library(data.table); library(forecast)
+library(pipeR); library(rlist); library(dplyr); library(httr);
+library(ggplot2); library(scales); library(tidyr); library(reshape2)
+library(RColorBrewer); library(gridExtra); library(GGally)
+library(caret); library(xtable)
+```
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## get Thanksgiving Dinner data from the American Farm Bureau Federation
+fileUrl <- "http://www.fb.org/newsroom/news_article/369/"
+doc <- htmlTreeParse(fileUrl, useInternal=TRUE)
+
+## locate the XML that has the table data and begin filtering it
+thanks.raw <- xpathApply(doc,"//td[@valign='top']", xmlValue)
+thanks.raw[1:5] <- NULL
+
+## loop through raw XML and extract the Thanksgiving Dinner price and year
+Year <- NULL
+date <- NULL
+price <- NULL
+x <- 1
+while(thanks.raw[[x]]!="Item"){
+        if(nchar(thanks.raw[[x]])==4) {
+                Year = c(Year, thanks.raw[[x]])
+                date = c(date, 
+                            paste(thanks.raw[[x]], "-11-01", sep=""))
+                } 
+        if(nchar(thanks.raw[[x]])==6) {
+                price = c(price, 
+                             as.numeric(substr(thanks.raw[[x]], 2, 6)))
+                }
+        x <- x + 1
+}
+
+## create a date table with the thanksgiving dinner prices
+thanks.prices <- data.table(date = as.Date(date), Year, 
+        series_name = "Thanksgiving", value = price)
+```
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+## access FRED database with API Key
+source("C:/R/FredR_JRE.R")
+source("C:/R/FredR_API.R")
+fred <- FredR_JRE(api.key)
+```
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+## create a data table of FRED codes and their corresponding series name
+fred.ref <- data.table(
+                FRED_code = c(
+                        "CPIAUCNS"
+                        ,"CPIUFDNS"
+                        ,"WPS022206"
+                        ,"PCU3111193111191"
+                        ,"MCOILWTICO"
+                        ,"WPU012202"
+                        ,"M1NS"
+                        ,"TWEXMMTH"
+                        ) 
+                ,series_name = c(
+                        "CPI"
+                        ,"Food"
+                        ,"Turkey"
+                        ,"Feed"
+                        ,"Oil"
+                        ,"Corn"
+                        ,"Money"
+                        ,"Dollar"
+                        )
+                )
+
+## loop through the vector of market codes and
+## pass each list item to a function to pull the
+## data series corresponding to the code from the
+## FRED database and create a list of tables for each code 
+data.list <- lapply(fred.ref$FRED_code, function (x) { 
+                fred$series.observations(series_id = x)
+        })
+
+## loop through the list of tables and select only the 
+## date and value columns
+## mutate date into a date class and value into a numeric class
+## mutiply value by 1 billion if the the value is M1 Money Stock
+data.list <- lapply(seq_along(data.list), function(x) {
+                data.list[[x]] %>% 
+                select(date, value) %>% 
+                mutate(date = as.Date(date), value = as.double(value),
+                       value = if(x == 8) value * 1000000000 
+                       else value) 
+        })
+
+## name each table in the list to its corresponding FRED Code
+names(data.list) <- fred.ref$FRED_code
+
+## rename the value column in each table in the list 
+## to its corresponding FRED Code
+data.list <- lapply(seq_along(data.list), function(x) {
+                setnames(data.list[[x]], "value", names(data.list[x])) 
+        })
+
+## merge all the table in the list into one big wide table
+## with many many columns 
+data.wide <- Reduce(function(x,y) {
+                merge(x,y, by = "date", all = TRUE)
+        }, data.list)
+
+## remove object from memory - no longer needed
+rm(data.list)
+
+## gather the various value columns into one dimension
+## transforms the wide table into a tall skinny table
+data.skinny <- data.wide %>% gather(FRED_code, value, -date)
+
+## remove object from memory - no longer needed
+rm(data.wide)
+
+## identify complete cases (no NAs) and load into binary vector
+good <- complete.cases(data.skinny)
+
+## merge the skinny data set with the market references
+## to get the market codes and states, and using only complete cases
+data.thanks <- merge(data.skinny[good], fred.ref, by = "FRED_code", all = TRUE)
+
+## remove objects from memory - no longer needed
+rm(data.skinny, fred.ref)
+
+## create a data table that annualizes the Fred data
+data.thanks.annual <- data.thanks %>% 
+        group_by(Year = year(date), series_name) %>% 
+        summarise(value = mean(value))
+
+## combine the Fred data and the Thanksgiving Dinner Price data
+data.thanks.annual <- rbind(data.thanks.annual, data.frame(thanks.prices)[,2:4])
+
+## add a new column called change that calculate the YOY rate of change for each series
+data.thanks.annual <- data.thanks.annual %>%
+        mutate(Year = as.numeric(Year), 
+        change = ifelse(series_name != data.thanks.annual[1,]$series_name &
+        series_name != lag(series_name, 1), NA, (value/lag(value, 1)-1)))
+```
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## variable creation - to use in text
+costs <- data.thanks.annual[series_name == "Thanksgiving", c("Year","value"), with=FALSE]
+cost.change <- tail(costs[,"value",with=FALSE],1) / head(costs[,"value",with=FALSE],1) - 1
+cost.change.avg <- (tail(costs[,"value",with=FALSE],1) / head(costs[,"value",with=FALSE],1) - 1) / nrow(costs)
+```
+
+Let us first consider just the data on Thanksgiving Dinner prices. When the tracking of Thanksgiving Dinner costs began in `r head(costs[,"Year",with=FALSE],1)` that cost was only `r sprintf('$%s', head(costs[,"value",with=FALSE],1))`. In `r tail(costs[,"Year",with=FALSE],1)` the cost has risen to `r sprintf('$%s', tail(costs[,"value",with=FALSE],1))` for a total change of `r sprintf('%1.2f%%', 100*cost.change)`. This averages out to `r sprintf('%1.2f%%', 100*cost.change.avg)` per year. In Fig. 1 we view how the price changes between `r head(costs[,"Year",with=FALSE],1)` and `r tail(costs[,"Year",with=FALSE],1)`. As we can see the price has ben increasing generally, although after showing a sharp increase between 2010 and 2011 the price has flattened out and remained steady until `r tail(costs[,"Year",with=FALSE],1)`.
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## set parameters for plots and get user coordinates 
+par(mfrow = c(1,1), cex = 0.75)
+usr <- par("usr")
+
+## assign x and y variable in order to plot the Year and cost of thanksgiving dinner
+x <- data.thanks.annual[series_name == "Thanksgiving"]$Year
+y <- data.thanks.annual[series_name == "Thanksgiving"]$value
+
+## line plot of thanksgiving dinner costs
+plot(x, y, type = "l", col = "darkorange", lwd = 2,
+     main = "Fig. 1: The Cost of Thanksgiving Dinner" , 
+     xlab = "Year", 
+     ylab = "Dollars)")
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+text(0.05, 0.78, paste("The Cost of Thanksgiving Dinner (", first(x), " - ", last(x), ")", sep=""), cex = 1.2, adj = 0)
+text(0.05, 0.70, paste(first(x), ": ", first(y), sep=""), adj = 0)
+text(0.05, 0.64, paste(last(x), ": ", last(y), sep=""), adj = 0)
+text(0.05, 0.58, paste("Total Inflation: ", sprintf('%1.2f%%', 100*cost.change), sep=""), adj = 0)
+text(0.05, 0.52, paste("Average Annual Inflation: ", sprintf('%1.2f%%', 100*cost.change.avg), sep=""), adj = 0)
+text(0.55, 0.03, "Data: American Farm Bureau Federation", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr)
+```
+
+
+#### What Drives Food Prices?
+
+Patrick Westhoff's book, *The Economics of Food*, is an excellent introduction into the factors that drive food prices. As with other economic dimensions food prices are determined most generally by supply and demand. However, underlying this oversimplification is a complex web of interactions and feedback loops, with no simple formulation that can provide us with an easy way to predict exactly where prices will head in the future. Nevertheless, Westhoff does provide eight rules of thumb that can be used as a guide for understanding the most salient factors in food price movements. They are as follows:
+
+
+* Food prices increase when biofuel production increases (Westhoff 10).
+                
+* Food prices move in the same direction as oil prices (35).
+                
+* Food prices can be driven up or down by relevant government policies (57).
+                
+* Food prices rise when adverse weather reduces yields (81).
+                
+* Food prices rise and fall with consumer incomes around the globe (97).
+                
+* Food prices measured in dollars rise when the value of the dollar weakens against other currencies (115).
+                
+* Market speculation can tenporarily move prices in any direction, but fundamentals will be reasserted in the end (129).
+                
+* There will always be unpredictable factors that confound prediction of food prices, such as crop diseases, animal viruses, war, and even diet fads (143).
+                
+Besides the factors that specifically impact food prices, there is the question of what underlies price changes for all consumer items. Inevitably, these details are even more complex and difficult to unwind than those for food, so it's easier to talk about some higher level concepts. When prices increase in an inflationary environment, the cause--at least the proximate one--can be categorized as demand pull or cost push. When the price level of all items increases it could be because aggregate demand has outpaced the rise of aggregate supply, so demand is pulling the price level higher. Cost push inflation happens when the factors of production, such as raw materials and labor, trend higher and this increase pushes up the prices of goods and services that require these inputs. 
+
+Demand pull and cost push are certainly ideas that help to explain short run price increases, but the sustained increase in the general price level over time requires additional explanation. It was the legendary economist Milton Friedman who summed up the root of the issue in his famous quip, "Inflation is always and everywhere a monetary phenomenon" (Mishkin 613). This is a reference to the fact that inflation, the persistent long run increase in the overall price level, is caused by a consistent increase in the money supply over time. The rise in money stocks has been at a higher pace than the supply of the goods and services that are purchased with this money, and this means that over the years the individual value of each monetary unit has declined relative to goods and services they buy, pushing up those prices. This has not necessarily been the case for indvidual goods and services, but is true of the aggregate price level. 
+
+
+#### What Drives Thanksgiving Dinner Costs?
+
+The traditional Thanksgiving Dinner as measured by the AFBF includes several different foods that might be at your table, but the the 16-pound turkey is by far the most costly. With an average price of $23.04 in 2015, the turkey accounts for about 46% of the total cost. This suggests that changes in the price of turkey will have the largest effect on the change in total cost, and the 1.42% increase in Thanksgiving Dinner prices from 2014 to 2015 is overwhelmingly due to the year over year increase in the price of the holiday bird. The cost of the turkey increased by $1.35 or 6.42%. This represents almost 200% of the total change in the cost of dinner, which was offset by declines in other food items for a total increase of $0.70 ("Thanksgiving Dinner..."). The significance of this staple to Thanksgiving Dinner calls for a deeper dive into the cost of turkeys.
+
+The cost for turkeys is going to be driven by many of the same factors as food prices overall, with supply and demand being the general determinants of the price. In order to show off their excellent Power BI tools, Microsoft has a cool demo animation that illustrates the areas of the US that produce the most turkeys as well as the areas that consume the most turkeys. Check out Microsoft's presentation at "<a href="http://blogs.msdn.com/b/powerbi/archive/2013/11/27/where-do-turkeys-come-from-let-s-find-out-using-power-bi.aspx" target="_blank">Where Do Turkeys Come From? Let's Find Out Using Power BI</a>." The US is the world's largest producer and consumer of turkey meat. Besides supply and demand, feed is the single largest expense for raising turkeys, accounting for about 60-70% of the cost (Sullivan). Turkey feed is primarily corn based, so a change in the price of corn is likely to be a significant factor in the cost for Thanksgiving Dinner. 
+
+There are many other factors that might come into play. In past articles on the subject I have discussed some of these. In the article, "<a href="http://en.paperblog.com/thanksgiving-dinner-and-inflation-forecasts-100543/" target="_blank">Thanksgiving Dinner and Inflation Forecasts</a>." I consider the impact of globalization and the growing demand for meat from a rising middle class in China and elsewhere. I also get into the role that weather and drought play in the article, "<a href="http://en.paperblog.com/thanksgiving-dinner-inflation-droughts-and-the-dust-bowl-357092/" target="_blank">Thanksgiving Dinner Inflation, Droughts, and the Dust Bowl</a>." Besides these considerations, a new factor has emerged recently, and that is the problem of bird flu. The US experienced the worst avian influenza outbreak in 2015, which forced the culling of 8 million turkeys, causing a five year low in production (Mulvany). Bird flu did not have a large impact on the price of Thanksgiving Dinner for 2015, and while it's difficult to project the impact on next year since we don't know if there will be any additional outbreaks between now and then, this has to be considered. In the next section I will explore various factors that might aid in the prediction of Thanksgiving Dinner costs in the years to come.
+
+
+#### Exploratory Analysis
+
+A helpful visualizaiton for a single data vector is a histogram. In Fig. 2 I examine a histogram of the annual year over year changes in price between `r head(costs[,"Year",with=FALSE],1)` and `r tail(costs[,"Year",with=FALSE],1)`.The price changes appear to have a roughly normal distribution. This pattern of central tendency may be useful in making predictions about future year over year price changes for Thanksgiving Dinner. Fig. 3 is the year over year price changes in chronological order, which shows how the last four years have seen very little growth in the cost of Thanksgiving dinner. This is remarkable given that these years coincide with an unprecendented increase in the money supply by the Federal Reserve in order to fight Panic of 2008 and subsqeunt Great Recession. This monetary stimulus was done through a program dubbed quantitative easing (QE), and for years there have been hyperventilations about hyperinflation that have obviously not yet come to pass. Does this prove Milton Friedman and the quantity theory of money wrong? No, it just means that increases in the money supply are indicative of long term inflation, while inflation in the short to medium term is directed by other factors.
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## set plotting parameters
+par(mfrow = c(2,1), cex = 0.75)
+
+## set x as the YOY change in Thanksgiving dinner prices
+x <- data.thanks.annual[series_name == "Thanksgiving" & Year >= 1987]$change
+
+## built a histogram plot of price changes
+hist(x, col = "darkorange", breaks = 15,
+        main = "Fig. 2: Histogram of Thanksgiving Dinner Price Changes",
+        xlab = "YOY Price Changes")
+xfit<-seq(min(x),max(x),length=15) 
+yfit<-dnorm(xfit,mean=mean(x),sd=sd(x))  
+lines(xfit, yfit, col="black", lwd=2)
+
+## set x as the year
+## set y as the YOY change in Thanksgiving dinner prices
+x <- data.thanks.annual[series_name == "Thanksgiving" & Year >= 1987]$Year
+y <- data.thanks.annual[series_name == "Thanksgiving" & Year >= 1987]$change
+
+## build a bar plot of price changes over time
+barplot(y, x, col = "darkorange", names.arg = as.factor(x), axisnames = TRUE,
+     main = "Fig. 3: Thanksgiving Dinner Price Changes" , 
+     xlab = "Year", 
+     ylab = "YOY Price Changes")
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## diplay text on plot indicating data source
+text(0.55, 0.05, "Data: American Farm Bureau Federation", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr) 
+```
+
+
+Next we consider the year over year changes in Thanksgiving Dinner prices along side the changes in other potentionl predictor variables. Below I consider some independent variables that might be useful for predicting future changes in the cost of Thanksgiving Dinner. I am using the Federal Reserve Bank of St. Louis' FRED database as a source to gather these additional data. The variables that I am exploring include potential drivers, as well as some input factors related to Thanksgiving Dinner. These are the consumer price indices (CPI) for all items and food, the producer price indices (PPI) for turkeys, turkey feed, and corn, the prices for WTI crude oil, the dollar exchange rate versus the major currencies, and the M1 money supply. The full names of the data series I am using, along with links to the series on FRED, are provided below: 
+
+* <a href="https://research.stlouisfed.org/fred2/series/CPIAUCNS" target="_blank">Consumer Price Index for All Urban Consumers: All Items</a>
+* <a href="https://research.stlouisfed.org/fred2/series/CPIUFDNS" target="_blank">Consumer Price Index for All Urban Consumers: Food</a>
+* <a href="https://research.stlouisfed.org/fred2/series/WPU022206" target="_blank">Producer Price Index by Commodity for Processed Foods and Feeds: Turkeys, Including Frozen, Whole, and Parts</a>
+* <a href="https://research.stlouisfed.org/fred2/series/WPU022206" target="_blank">Producer Price Index by Industry: Other Animal Food Manufacturing: Chicken and Turkey Feed, Supplements, Concentrates, and Premixes</a>
+* <a href="https://research.stlouisfed.org/fred2/series/WPU012202" target="_blank">Producer Price Index by Commodity for Farm Products: Corn</a>
+* <a href="https://research.stlouisfed.org/fred2/series/MCOILWTICO" target="_blank">Crude Oil Prices: West Texas Intermediate (WTI) - Cushing, Oklahoma</a>
+* <a href="https://research.stlouisfed.org/fred2/series/M1NS" target="_blank">M1 Money Stock</a>
+
+With many potential factors to consider, searching for correlations can be challenging and time consuming. The best way to explore data like this is to visualize the data in some way. For example, say I want to compare the year over year change in all of these time series in order to locate data series that show a similar pattern. Fig. 4 is a chart of the year over year percent change for all these variables between 1986 and 2015. As you can see, this chart has a lot of data packed into it, but it is virtually impossible to read and draw any conclusions from it. There are just too many data points to consider and they all overlap each other, making this visualization messy and thoroughly unhelpful. A much better way to view the relationships between multiple variables is a matrix of scatter plots and correlations.
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## find the minimum and maximum years for each series and 
+## filter the data to this time frame
+min_years <- tapply(data.thanks.annual$Year, data.thanks.annual$series_name, 
+        FUN=min)
+max_years <- tapply(data.thanks.annual$Year, data.thanks.annual$series_name, 
+        FUN=max)
+min.common.year <- max(min_years)
+max.common.year <- min(max_years)
+data.thanks.filter = data.thanks.annual %>% 
+        filter(Year >= min.common.year, Year <= max.common.year)
+
+## create another data from with lagged rates of change
+data.thanks.filter.lag <- data.thanks.filter[series_name == 
+        "Thanksgiving",] %>% 
+                mutate(Year = Year + 1)
+data.thanks.filter.lag <- rbind(data.thanks.filter.lag, data.thanks.filter[series_name != 
+        "Thanksgiving",])
+
+## create a color palette
+cols <- brewer.pal(10, "Set3")
+
+## build and disply a time series ggplot of changes in thanksgiving dinner 
+## costs compared to changes in other relevant economic variables
+g1 <- ggplot(data.thanks.filter[Year > 1986]) +
+        geom_line(aes(x = Year, y = change, col = series_name), size = 1.2) +
+        scale_colour_manual(values = cols) +
+        scale_y_continuous(labels = percent) +
+        ggtitle("Fig. 4: Thanksgiving Dinner Prices and Related Variables - Rates of Change") +
+        ylab("YOY Change") + xlab("Year") +
+        theme_bw() +
+        theme(panel.grid.major = element_blank(), 
+                panel.grid.minor = element_blank(), 
+                legend.direction="horizontal", legend.position="bottom", 
+                legend.box="horizontal", legend.title=element_blank(),
+                plot.title = element_text(size=12, face="bold")) +
+        geom_text(size = 3, x = 2016, y = -0.45, hjust = 1,
+                aes(label = 
+                    "Data: American Farm Bureau Federation\nFRED, Federal Reserve Bank of St. Louis"))
+g1
+```
+
+
+Fig. 5 illustrates a correlation matrix for the cost of Thanksgiving Dinner versus the other independent variables. The matrix allows us view how each price variable relates to Thanksgiving Dinner using a scatter plot plus a correlation coefficient, as well as how each of these variables relate individually to each other. The cost of Thanksgiving Dinner correlates positively and strongly with all the variables over time, most significantly with food prices, all prices, the money supply, oil, and feed prices. The dollar exchange, turkeys, and corn show solid positive relationships to the holiday dinner as well, but the dollar exchange is the only inverse relationship. This means that over time the prices for all of these variables increase or decrease together, except for the dollar exchange rate which has decreased while the other variables have increased. While these high correlations seem to suggest that we can use various price index data to forecast the future of Thanksgiving Dinner costs, the situation is not that simple. This is because the main factor behind all of these correlated price increases over time is simply inflation. Over time the price level increases steadily and this confounds the relationships for all of the variables since low prices are associated with earlier years and higher prices are associated with more recent years. We get an interesting picture of long term inflation this way, but not necessarily any insights that can be leveraged for forecasting price changes over the next few years.
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## cast the data set into a wider framework that can be plotted with ggpairs
+data.thanks.cast.value <- dcast(data.thanks.filter, Year ~ series_name, value.var = "value")
+data.thanks.cast.value  <- data.thanks.cast.value [complete.cases(data.thanks.cast.value ),]
+setnames(data.thanks.cast.value, "Thanksgiving", "Thanks")
+data.thanks.cast.value <- data.thanks.cast.value[,c(1,2,10,3,4,5,6,7,8,9)]
+
+## built a scatterplot matrix comparing 
+g2 = ggpairs(data.thanks.cast.value , lower=list(continuous="smooth", params=list(size=0.75)), 
+        upper = list(params=list(size=3)), params=list(method="loess"), 
+        axisLabels = "none", 
+        title = "Fig. 5: Thanksgiving vs. Related Variables - Correlation Matrix")
+g2 = g2 + theme_bw()
+g2
+```
+
+To get a better sense of which independent variables are correlated with the change in Thanksgiving Dinner costs we can look at the correlations in year over year price changes. This will tell us whether or not any of these other variables show similar price movements from year to year. For example, does the annual rate of change in Thanksgiving Dinner costs correspond to the annual rate of change in CPI, food prices, oil, or the money supply. Consider a matrix of these correlations in Fig. 6. As you can see, these correlations are much weaker when we consider rates of change instead of nominal values. The strongest correlation is between Thanksgiving costs and the prices of corn and turkey feed. This makes sense given that these factors are direct and primary inputs in the production costs for turkeys. Even corn and turkey feed appear to be fairly weak determinants to rely on for predictions though.
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## cast the data set into a wider framework that can be plotted with ggpairs
+data.thanks.cast.change <- dcast(data.thanks.filter, Year ~ series_name, value.var = "change")
+data.thanks.cast.change <- data.thanks.cast.change[complete.cases(data.thanks.cast.change),]
+setnames(data.thanks.cast.change, "Thanksgiving", "Thanks")
+data.thanks.cast.change <- data.thanks.cast.change[,c(1,2,10,3,4,5,6,7,8,9)]
+
+## built a scatterplot matrix
+g3 = ggpairs(data.thanks.cast.change, lower=list(continuous="smooth", params=list(size=0.75)), 
+        upper = list(params=list(size=3)), params=list(method="loess"), 
+        axisLabels = "none", 
+        title = "Fig. 6: Thanksgiving vs. YOY Price Changes - Correlation Matrix")
+g3 = g3 + theme_bw()
+g3
+```
+
+An even greater challenge is that these rates of change are measures of the coincident impact on Thanksgiving Dinner costs, but to really leverage independent variables for prediction we either need leading indicators or a good way to reliably forecast the independent variables. To this end I considered the same correlations with the predictor variable lagged a year behind Thanksgiving Dinner prices. This gives me the correlations that will indicate whether using this year's values for the predictor variables can be used to predict next year's Thanksgiving prices. These lagged correlations are shown in Fig. 7. As the correlation matrix illustrates, there is virtually no correlations when using the lagged variables. This means we are not able to leverage any leading indicators from this data set. 
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## cast the data set into a wider framework that can be plotted with ggpairs
+data.thanks.cast.change.lag <- dcast(data.thanks.filter.lag, Year ~ series_name, value.var = "change")
+data.thanks.cast.change.lag <- data.thanks.cast.change.lag[complete.cases(data.thanks.cast.change.lag),]
+setnames(data.thanks.cast.change.lag, "Thanksgiving", "Thanks")
+data.thanks.cast.change.lag <- data.thanks.cast.change.lag[,c(1,2,10,3,4,5,6,7,8,9)]
+
+## built a scatterplot matrix
+g4 = ggpairs(data.thanks.cast.change.lag, lower=list(continuous="smooth", params=list(size=0.75)), 
+        upper = list(params=list(size=3)), params=list(method="loess"), 
+        axisLabels = "none", 
+        title = "Fig. 7: Thanksgiving vs. Lagged YOY Price Changes - Correlation Matrix")
+g4 = g4 + theme_bw(base_size = 8)
+g4
+```
+
+
+If there is any hope of using predictor variables to forecast the future of Thanksgiving Dinner costs it looks like coincident corn prices might be the best bet. This means that I need to first forecast corn prices. I will cover building these models in the next section.
+
+
+#### Build and Select Forecast Models
+
+There are a few different options when forecasting future costs for Thanksgiving Dinner. These fall into roughly two categories. There is time series forecasting, in which the data from past observations of a particular data series are used to forecast the future of that same data series. The other broad category to consider are forecasting methods that utilize independent predictor variables to forecast the data series in question. The power of these different methods depends on the data and assumptions about the patterns and causal factors that can be exploited as forward indicators. For time series methods to work there must be patterns in the past, trends, seasonal fluctuations, and/or some sort of cyclical regularity in the historical data that can then be extrapolated based on the assumption that these patterns will continue into the future. In order to utilize predictor variables for forecasting there must either be independent leading indicators or independent coincident indicators which themselves exhibit reliable predictability.
+
+Time series methods include moving averages, trend and season decomposition, exponential smoothing, and autoregressive integrated moving averages (ARIMA). In terms of forecasting the price of Thanksgiving Dinner directly with time series, the data is annual so there are no seasonal patterns to exploit. Additionally, there are no obvious and regular cyclical patterns in the Thanksgiving cost data. Time series methods in this context are more about tracing trends or assuming averages in order to extrapolate the future of annual Thanksgiving Dinner prices, although there are some more sophisticated techniques which we will consider. 
+
+Methods that use independent variables to predict Thanksgiving prices could include regression analysis and machine learning techniques. These approaches can get quite complicated and as mentioned before the big challenge is that predictor variables must be leading indicators or coincident indicators which must be forecasted as well. I will consider some potential predictor variables, looking at how well these correlate to Thanksgiving Dinner costs and whether they are leading indicators or are themselves forecastable using time series techniques. 
+
+First I want to make an attempt at forecasting the producer price for corn. Surely there are some sophisticated forecasting models being utilized for the prediction of corn yields and prices, but for my purposes this could get a little deep. To keep this analysis simple I will consider using two time series methods, Exponential Smoothing and ARIMA, to forecast the monthly prices for a five year period. Forecasting monthly prices will allow me to apply models with seasonal elements. Fig. 8 is a chart of the additive decomposed corn prices, the top panel shows the actual monthly price, the second panel shows the decomposed trend, the third panel shows the decomposed seasonal swings, and the bottom panel shows the decomposed error term. A quick inspection of this chart indicates that after many years of fairly stable prices, the trend has spiked up a couple of times in the recent past, in 2008 and again in 2010, but has headed back down most recently. This suggests we may have some challenges using time series methods to predict corn prices, since these cyclical ups and downs cannot be captured by the models.
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## create a data frame with corn prices by month and then build a time series object
+corn <- data.thanks[series_name == "Corn", c("date", "value"), with=FALSE]
+corn.ts <- ts(corn$value, c(year(corn[1,date]), month(corn[1,date])), 
+         c(year(corn[nrow(corn),date]), month(corn[nrow(corn),date])), frequency = 12)
+
+## set the plotting parameters: font sizes and lined widths 
+par(mfrow = c(1,1), cex = 0.75)
+
+## plot the decomposition of the corn prices
+plot(decompose(corn.ts), xlab = "Years+1")
+text(1975, -10, "Fig. 8:", cex = 1.5, pos = 3, offset = 11)
+```
+
+
+In Fig. 9 I illustrate an Exponential Smoothing model forecast. This particular model, ETS(M, M, M) uses multiplicative assumptions for the error, trend, and seasonal components to build a model and forecast. The model is built from the data series through 2010, and the five year forecast generated is evaluated against the actual numbers for 2011 through 2015. The results are not great, with high error rates on the test set. I give it one more try using an ARIMA model, which is depicted in Fig. 10. The ARIMA(0, 1, 1)(0, 1, 1)12 is a seasonal "airport model" used by Box-Jenkins to demonstrate their methodology for doing ARIMA forecasts. For more on ARIMA see my previous article, "<a href="http://en.paperblog.com/what-i-learned-in-turkey-about-forecasting-turkey-dinner-730163/" target="_blank">What I Learned in Turkey about Forecasting Turkey Dinner</a>." While there is slightly better performance with the ARIMA model over the Exponential Smoothing model, the error rates are still very high.
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## create the time series objects for corn prices
+corn.ts.train <- window(corn.ts, start = 1986, end = 2011)
+corn.ts.test <- window(corn.ts, start = 2011)
+
+## create exponential smoothing model and forecast 60 periods ahead
+model.ets.corn <- ets(corn.ts.train,"MMM")
+fcst.ets.corn  <- forecast(model.ets.corn, h=60)
+
+## get the formula for the ARIMA model
+form.ets.con <- model.ets.corn$method
+
+## calcualte accuracy data and assign stats to variables
+accuracy.ets.corn <- accuracy(fcst.ets.corn, corn.ts.test)
+RMSE <- accuracy.ets.corn[[2,2]]
+MAPE <- accuracy.ets.corn[[2,5]]
+
+## set the plotting parameters: font sizes and lined widths 
+par(mfrow = c(1,1), cex = 1, lwd = 3)
+
+## plot forecast model of corn, with orange line for
+## actuals, red line for hold out sample, and blue line for forecast
+plot(fcst.ets.corn, col = "darkorange", lwd = 2,
+        main = "Fig. 9: Forecast of Corn Prices - Exponential Smoothing", 
+        xlab = "Year", 
+        ylab = "Index")
+lines(corn.ts.test, col = "red", lwd = 2)
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## build and display legend
+legend(0.03, 0.87, c("Cost", "Forecast", "Hold-Out", "80% PI", "95% PI"),
+       lty=c(1,1), lwd=c(3,3,3,3,3), , inset = .05,
+       col=c("darkorange", "blue", "red", "darkgray", "lightgray"))
+
+## display text on plot with model information
+text(0.3, 0.85, "Exponential Smoothing Model:", adj = 0, font = 4)
+text(0.3, 0.79, form.ets.con, adj = 0)
+
+## display text on plot with testing accuracy stats
+text(0.3, 0.70, "Accuracy on Hold-Out Actuals:", adj = 0, font = 4)
+text(0.3, 0.64, paste("RMSE: ", round(RMSE,2), sep=""), adj = 0)
+text(0.3, 0.58, paste("MAPE: ", sprintf('%1.2f%%', round(MAPE,2)), 
+                      sep=""), adj = 0)
+
+## diplay text on plot indicating data source
+text(0.55, 0.03, "Data: US. Bureau of Labor Statistics, FRED", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr) 
+```
+
+
+```{r  echo=FALSE, warning=FALSE, message=FALSE}
+## create ARIMA model and forecast 60 periods ahead
+model.arima.corn <- arima(corn.ts.train, 
+        order = c(0,1,1), seasonal = list(order = c(0,1,1), 12))
+fcst.arima.corn  <- forecast(model.arima.corn, h=60)
+
+## get the formula for the ARIMA model
+form.arima.corn  <- gsub(" ", "", fcst.arima.corn$method, fixed = TRUE)
+
+## calcualte accuracy data and assign stats to variables
+accuracy.arima.corn <- accuracy(fcst.arima.corn, corn.ts.test)
+RMSE <- accuracy.arima.corn[[2,2]]
+MAPE <- accuracy.arima.corn[[2,5]]
+
+## plot forecast model of corn, with orange line for
+## actuals, red line for hold out sample, and blue line for forecast
+plot(fcst.arima.corn, col = "darkorange", lwd = 2,
+        main = "Fig. 10: Forecast of Corn Prices - ARIMA", 
+        xlab = "Year", 
+        ylab = "Index")
+lines(corn.ts.test, col = "red", lwd = 2)
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## build and display legend
+legend(0.03, 0.87, c("Cost", "Forecast", "Hold-Out", "80% PI", "95% PI"),
+       lty=c(1,1), lwd=c(3,3,3,3,3), , inset = .05,
+       col=c("darkorange", "blue", "red", "darkgray", "lightgray"))
+
+## display text on plot with model information
+text(0.3, 0.85, "ARIMA(p,d,q) Model:", adj = 0, font = 4)
+text(0.3, 0.79, form.arima.corn, adj = 0)
+
+## display text on plot with testing accuracy stats
+text(0.3, 0.70, "Accuracy on Hold-Out Actuals:", adj = 0, font = 4)
+text(0.3, 0.64, paste("RMSE: ", round(RMSE,2), sep=""), adj = 0)
+text(0.3, 0.58, paste("MAPE: ", sprintf('%1.2f%%', round(MAPE,2)), 
+                      sep=""), adj = 0)
+
+## diplay text on plot indicating data source
+text(0.55, 0.03, "Data: US. Bureau of Labor Statistics, FRED", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr)
+```
+
+
+Given the difficulty with forecasting the producer price of corn using time series methods, not to mention the mediocre correlation as a predictor variable for Thanksgiving Dinner costs, the approach of using predictor variables and regression does not appear promising. Perhaps in the future I could turn my sights onto forecasting corn and other related variables more accurately. For now I will abandon the use of drivers and causal factors, and simply forecast Thanksgiving Dinner costs using time series methods. 
+
+I will train and build four time series models using Thanksgiving Dinner prices from 1986 to 2010 and then test the predictions from these models against the actual prices from 2011 to 2015. The purpose of this approach of splitting the data into training and testing sets is to reduce the problem of overfitting and to compare the quality of different methods. Overfitting can be a problem for predictive models when the model is trained to precisely fit the data without considering how well this model will perform on new independent data, because the precise fit may include idiosyncratic factors that are not present in other samples of the data. Comparing the forecasts to an independent testing set gives us an estimate of the out of sample error rates and gives us a truer sense of which methods might perform better on future data.
+
+For the first time series forecast of Thanksgiving Dinner costs, I am using the Exponential Smoothing method. The model applied to this data is ETS(A, A, N), which means that it uses additive error, additive trend, and no seasonal component. This forecast is displayed in Fig. 11. In testing against the hold out sample, the model has an RMSE of 3.64 and a MAPE of 7.19%. This isn't excellent, but this outcome is much better than the 38% MAPE we saw when applying the Exponential Smoothing model to corn prices.
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+## create a data set of the Thanksgiving dinner data
+thanks.value <- data.thanks.annual[series_name == "Thanksgiving", c("Year", "value"), with=FALSE]
+ts.thanks.value <- ts(thanks.value$value, c(thanks.value[1,Year], 1), 
+         c(thanks.value[nrow(thanks.value), Year], 1), frequency = 1)
+
+## create time series objects for all, train, and test sets
+ts.all.thanks.value <- ts.thanks.value
+ts.train.thanks.value <- window(ts.thanks.value, start = 1986, end = 2010)
+ts.test.thanks.value <- window(ts.thanks.value, start = 2011)
+```
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+## create an exponential smoothing model and forecast the next 5 periods head
+model.ets.thanks.value <- ets(ts.train.thanks.value,"ZZN")
+fcst.ets.thanks.value <- forecast(model.ets.thanks.value, h=5)
+
+## get the formula for the exponential smoothing model
+form.ets <- model.ets.thanks.value$method
+
+## calcualte accuracy data and assign stats to variables
+accuracy.ets.thanks.value <- accuracy(fcst.ets.thanks.value, ts.test.thanks.value)
+RMSE <- accuracy.ets.thanks.value[[2,2]]
+MAPE <- accuracy.ets.thanks.value[[2,5]]
+
+## plot forecast model of thanksgiving dinner costs, with orange line for
+## actuals, red line for hold out sample, and blue line for forecast
+plot(fcst.ets.thanks.value,  col = "darkorange", lwd = 2,
+     main = "Fig. 11: Forecast of Thanksgiving Prices - Exponential Smoothing", 
+     xlab = "Year", 
+     ylab = "Dollars")
+lines(ts.test.thanks.value, col = "red", lwd = 2)
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## build and display legend
+legend(0.03, 0.87, c("Cost", "Forecast", "Hold-Out", "80% PI", "95% PI"),
+       lty=c(1,1), lwd=c(3,3,3,3,3), , inset = .05,
+       col=c("darkorange", "blue", "red", "darkgray", "lightgray"))
+
+## display text on plot with model information
+text(0.3, 0.85, "Exponential Smoothing Model:", adj = 0, font = 4)
+text(0.3, 0.79, form.ets, adj = 0)
+
+## display text on plot with testing accuracy stats
+text(0.3, 0.70, "Accuracy on Hold-Out Actuals:", adj = 0, font = 4)
+text(0.3, 0.64, paste("RMSE: ", round(RMSE,2), sep=""), adj = 0)
+text(0.3, 0.58, paste("MAPE: ", sprintf('%1.2f%%', round(MAPE,2)), 
+                      sep=""), adj = 0)
+
+## diplay text on plot indicating data source
+text(0.55, 0.03, "Data: American Farm Bureau Federation", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr) 
+```
+
+
+Next I will use the non-seasonal ARIMA method with the specific model being ARIMA(3, 2, 4). To build this type of model one needs to specify the order of the autoregressive (AR), integrated (I), and moving average (MA) components, which the respective numbers in the paranthesis of the model. The autoregressive term specifies the relationship between any one time period and previous periods. The integrated term handles trends in the data and specifies how many times the data should be differenced in the model. The moving average term specifies the relationship between new forecasts and prior forecasts. This ARIMA model is the best performing time series option on the hold out sample data, with an RMSE of 1.89 and a MAPE of 2.72%. Most of the hold-out sample actuals fall within the prediction intervals, except the first observation.
+
+How did I choose the order of the model components? This is a much more in depth model building process that what I have shown here. I actually built a specialized Shiny web app that handles model selection process for implementing ARIMA on the Thanksgiving Dinner price data. The model selection process used is the Box-Jenkins methodology of identification, estimation, and diagnostic checking, steps that are iterated until the desired model is found. You can try this for yourself with the <a href="https://realizingfutures.shinyapps.io/ThanksgivingArimaApp/" target="_blank">Thanksgiving Dinner Cost Forecaster</a>.
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+## create an ARIMA model and forecast the next 5 periods head
+model.arima.thanks.value <- arima(ts.train.thanks.value,  order = c(3,2,4), 
+        seasonal = list(order = c(0,0,0), 1), method="ML")
+fcst.arima.thanks.value  <- forecast(model.arima.thanks.value, h=5)
+
+## get the formula for the ARIMA model
+form.arima <- gsub(" ", "", fcst.arima.thanks.value$method, fixed = TRUE)
+
+## calcualte accuracy data and assign stats to variables
+accuracy.arima.thanks.value <- accuracy(fcst.arima.thanks.value, ts.test.thanks.value)
+RMSE <- accuracy.arima.thanks.value[[2,2]]
+MAPE <- accuracy.arima.thanks.value[[2,5]]
+
+## plot forecast model of thanksgiving dinner costs, with orange line for
+## actuals, red line for hold out sample, and blue line for forecast
+plot(fcst.arima.thanks.value,  col = "darkorange", lwd = 2,
+        main = "Fig. 12: Forecast of Thanksgiving Prices - ARIMA", 
+        xlab = "Year", 
+        ylab = "Cost (dollars)")
+lines(ts.test.thanks.value, col = "red", lwd = 2)
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## build and display legend
+legend(0.03, 0.87, c("Cost", "Forecast", "Hold-Out", "80% PI", "95% PI"),
+       lty=c(1,1), lwd=c(3,3,3,3,3), , inset = .05,
+       col=c("darkorange", "blue", "red", "darkgray", "lightgray"))
+
+## display text on plot with model information
+text(0.3, 0.85, "ARIMA(p,d,q) Model:", adj = 0, font = 4)
+text(0.3, 0.79, form.arima, adj = 0)
+
+## display text on plot with testing accuracy stats
+text(0.3, 0.70, "Accuracy on Hold-Out Actuals:", adj = 0, font = 4)
+text(0.3, 0.64, paste("RMSE: ", round(RMSE,2), sep=""), adj = 0)
+text(0.3, 0.58, paste("MAPE: ", sprintf('%1.2f%%', round(MAPE,2)), 
+                      sep=""), adj = 0)
+
+## diplay text on plot indicating data source
+text(0.55, 0.03, "Data: American Farm Bureau Federation", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr)
+```
+
+
+For the third time series model I am just going to assume that future prices will increase at the annual mean inflation rate of Thanksgiving Dinner costs over the life of the entire time series. The mean inflation rate from 1986 to 2010 is 1.96% per year. With a RMSE of 3.51 and MAPE of 6.79% this method performs better on the hold-out sample than the Exponential Smoothing model, but not at well as the ARIMA model. One benefit is that the actuals in the hold-out period are all within the prediction intervals, but I should note that these intervals are fairly wide for this model.
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+## create a new data frame that is the YOY rates of change
+thanks.change <- data.thanks.annual[series_name == "Thanksgiving", c("Year", "change"), with=FALSE]
+ts.thanks.change <- ts(thanks.change$change, c(thanks.change[1,Year], 1), 
+         c(thanks.change[nrow(thanks.change), Year], 1), frequency = 1)
+
+## create time series objects for all, train, and test sets of the rates of change data
+ts.all.thanks.change <- window(ts.thanks.change, start = 1987, end = 2015)
+ts.train.thanks.change <- window(ts.thanks.change, start = 1987, end = 2010)
+ts.test.thanks.change <- window(ts.thanks.change, start = 2011)
+
+## build a mean inflation rate model
+model.meanf.thanks.change <- meanf(ts.train.thanks.change, h=5)
+
+## get the formula for the mean inflation model
+form.meanf <- sprintf('%1.2f%%', 100*model.meanf.thanks.change[[5]][1])
+
+## create some variables, first one has the value for the price in 2010 and the second is null
+value <- value_hi80 <- value_lo80 <- value_hi95 <- value_lo95 <- thanks.value$value[Year == 2010]
+value.point <- value.hi80 <- value.lo80 <- value.hi95 <- value.lo95 <- NULL
+
+## this step requires a little more work
+## use the mean inflation rates to calculate the forecasts 
+## for the next five periods using a loop
+for(i in 1:5){        
+        
+        value <- value + (value * model.meanf.thanks.change[[5]][i])
+        value_lo80 <- value + (value * model.meanf.thanks.change[[6]][i,1])
+        value_hi80 <- value + (value * model.meanf.thanks.change[[7]][i,1])
+        value_lo95 <- value + (value * model.meanf.thanks.change[[6]][i,2])
+        value_hi95 <- value + (value * model.meanf.thanks.change[[7]][i,2])
+        
+        value.point <- c(value.point, value)
+        value.lo80 <- c(value.lo80, value_lo80)
+        value.hi80 <- c(value.hi80, value_hi80)
+        value.lo95 <- c(value.lo95, value_lo95)
+        value.hi95 <- c(value.hi95, value_hi95)      
+}
+
+## create new meanf model object using the values from 
+## the thanksgiving data set rather than the change
+## this is just to have a meanf model object that can be used 
+## to hold the data we store the values we just calculated
+model.meanf.thanks.value <- meanf(ts.train.thanks.value, h=5)
+
+## pack the forecast values calculated into the meanf model of values
+model.meanf.thanks.value[[5]][1:5] <- value.point
+model.meanf.thanks.value[[6]][,1][1:5] <- value.lo80
+model.meanf.thanks.value[[7]][,1][1:5] <- value.hi80
+model.meanf.thanks.value[[6]][,2][1:5] <- value.lo95
+model.meanf.thanks.value[[7]][,2][1:5] <- value.hi95
+
+## calcualte accuracy data and assign stats to variables
+accuracy.meanf.thanks.value <- accuracy(value.point, ts.test.thanks.value)
+RMSE <- accuracy.meanf.thanks.value[[1,2]]
+MAPE <- accuracy.meanf.thanks.value[[1,5]]
+
+## plot forecast model of thanksgiving dinner costs, with orange line for
+## actuals, red line for hold out sample, and blue line for forecast      
+plot(model.meanf.thanks.value,  col = "darkorange", lwd = 2,
+        main = "Fig. 13: Forecast of Thanksgiving Prices - Mean Inflation Rate", 
+        xlab = "Year", 
+        ylab = "Dollars")
+lines(ts.test.thanks.value, col = "red", lwd = 2)
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## build and display legend
+legend(0.03, 0.87, c("Cost", "Forecast", "Hold-Out", "80% PI", "95% PI"),
+       lty=c(1,1), lwd=c(3,3,3,3,3), , inset = .05,
+       col=c("darkorange", "blue", "red", "darkgray", "lightgray"))
+
+## display text on plot with model information
+text(0.3, 0.85, "Mean Inflation Rate Model:", adj = 0, font = 4)
+text(0.3, 0.79, form.meanf, adj = 0)
+
+## display text on plot with testing accuracy stats
+text(0.3, 0.70, "Accuracy on Hold-Out Actuals:", adj = 0, font = 4)
+text(0.3, 0.64, paste("RMSE: ", round(RMSE,2), sep=""), adj = 0)
+text(0.3, 0.58, paste("MAPE: ", sprintf('%1.2f%%', round(MAPE,2)), 
+                      sep=""), adj = 0)
+
+## diplay text on plot indicating data source
+text(0.55, 0.03, "Data: American Farm Bureau Federation", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr)
+```
+
+
+The final model that I am utilizing is a simple linear regression. This method models the cost of Thanksgiving Dinner as a linear relationship to the year and fits the best line. This line takes the form y = -1520.94 + 0.78x, which suggests that for each year that passes the price of Thanksgiving Dinner will rise about 78 cents. Overall this is the second best performing model with a RMSE of 1.84 and MAPE of 4.49%, although two observations from the hold-out sample actuals falls outside the 95% prediction intervals and all of the hold-out sample actuals fall outside the 80% prediction intervals. 
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+## build an linear model and use it to produce forecasts for 5 periods ahead
+model.lm.thanks.value <- lm(value ~ Year ,data=thanks.value[Year < 2011,])
+fcst.lm.thanks.value <- forecast(model.lm.thanks.value, h = 5, 
+        newdata = thanks.value[Year > 2010])
+
+## get the formula for the linear model
+form.lm <- paste("y = ", round(model.lm.thanks.value$coeff[[1]],2), 
+                 " + ", round(model.lm.thanks.value$coeff[[2]],2), "x", sep="")
+
+## calcualte accuracy data and assign stats to variables
+accuracy.lm.thanks.value <- accuracy(fcst.lm.thanks.value, ts.test.thanks.value)
+RMSE <- accuracy.lm.thanks.value[[1,2]]
+MAPE <- accuracy.lm.thanks.value[[1,5]]
+
+## plot forecast model of thanksgiving dinner costs, with orange points for
+## actuals, red points for hold out sample, and blue points for forecast
+plot(fcst.lm.thanks.value, col = "darkorange", lwd = 2,
+        main = "Fig. 14: Forecast of Thanksgiving Prices - Simple Linear Regression", 
+        xlab = "Year", 
+        ylab = "Dollars")
+points(ts.test.thanks.value, col = "red", lwd = 2)
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## build and display legend
+legend(0.03, 0.87, c("Cost", "Forecast", "Hold-Out", "80% PI", "95% PI"),
+       lty=c(1,1), lwd=c(3,3,3,3,3), , inset = .05,
+       col=c("darkorange", "blue", "red", "darkgray", "lightgray"))
+
+## display text on plot with model information
+text(0.3, 0.85, "Linear Model:", adj = 0, font = 4)
+text(0.3, 0.79, form.lm, adj = 0)
+
+## display text on plot with testing accuracy stats
+text(0.3, 0.70, "Accuracy on Hold-Out Actuals:", adj = 0, font = 4)
+text(0.3, 0.64, paste("RMSE: ", round(RMSE,2), sep=""), adj = 0)
+text(0.3, 0.58, paste("MAPE: ", sprintf('%1.2f%%', round(MAPE,2)), 
+                      sep=""), adj = 0)
+
+## diplay text on plot indicating data source
+text(0.55, 0.03, "Data: American Farm Bureau Federation", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr)
+```
+
+
+#### Final Forecast
+
+Now that I have tested a few models against hold-out sample data, I have decided to use all four models and average the output for a final forecast model. To do this I will use the four model approaches above, Exponential Smoothing, ARIMA, Mean Inflation Rate, and Simple Linear Regression, but I will reapply these models to the full time series for Thanksgiving Dinner. This means I will build the models using the data from 1986 through 2015 and then forecast the next five years out, 2016 through 2020. The final forecast will be the mean of the four individual forecasts, and the 80% and 95% prediction intervals will also be the means of the outcomes from the four forecast models. See Fig. 14 for a visual display of this final forecast. The reason I decided to take a simple mean of the four forecast models, rather than a weighted average, is because the past performance of these methods/models does not necessarily tell me which ones will be better or worse performers in the future. Given this a simple average provides a diverse selection. I have written more about the benefits of combining diverse forecasts in the article, "<a href="http://en.paperblog.com/macroeconomic-forecasting-with-diverse-predictions-501592/" target="_blank">Macroeconomic Forecasting with Diverse Predictions</a>." 
+
+```{r results="asis", echo=FALSE, warning=FALSE, message=FALSE}
+
+## exponential smoothing model
+model.ets.thanks.value.final <- ets(ts.all.thanks.value,"ZZN")
+fcst.ets.thanks.value.final <- forecast(model.ets.thanks.value.final, h=5)
+
+## ARIMA model
+model.arima.thanks.value.final <- arima(ts.all.thanks.value,  order = c(3,2,4), 
+        seasonal = list(order = c(0,0,0), 1), method="ML")
+fcst.arima.thanks.value.final  <- forecast(model.arima.thanks.value.final, h=5)
+form.arima <- gsub(" ", "", fcst.arima.thanks.value.final$method, fixed = TRUE)
+
+## mean inflation model
+model.meanf.thanks.change.final <- meanf(ts.all.thanks.change, h=5)
+form.meanf <- sprintf('%1.2f%%', 100*model.meanf.thanks.change.final[[5]][1])
+
+value <- value_hi80 <- value_lo80 <- value_hi95 <- value_lo95 <- thanks.value$value[Year == 2015]
+value.point <- value.hi80 <- value.lo80 <- value.hi95 <- value.lo95 <- NULL
+
+for(i in 1:5){        
+        
+        value <- value + (value * model.meanf.thanks.change.final[[5]][i])
+        value_lo80 <- value + (value * model.meanf.thanks.change.final[[6]][i,1])
+        value_hi80 <- value + (value * model.meanf.thanks.change.final[[7]][i,1])
+        value_lo95 <- value + (value * model.meanf.thanks.change.final[[6]][i,2])
+        value_hi95 <- value + (value * model.meanf.thanks.change.final[[7]][i,2])
+        
+        value.point <- c(value.point, value)
+        value.lo80 <- c(value.lo80, value_lo80)
+        value.hi80 <- c(value.hi80, value_hi80)
+        value.lo95 <- c(value.lo95, value_lo95)
+        value.hi95 <- c(value.hi95, value_hi95)
+        
+}
+
+## create new meanf model object using the values from 
+## the thanksgiving data set rather than the change
+## this is just to have a meanf model object that can be used 
+## to hold the data we store the values we just calculated
+model.meanf.thanks.value.final <- meanf(ts.all.thanks.value, h=5)
+
+## pack the forecast values calculated into the meanf model of values
+model.meanf.thanks.value.final[[5]][1:5] <- value.point
+model.meanf.thanks.value.final[[6]][,1][1:5] <- value.lo80
+model.meanf.thanks.value.final[[7]][,1][1:5] <- value.hi80
+model.meanf.thanks.value.final[[6]][,2][1:5] <- value.lo95
+model.meanf.thanks.value.final[[7]][,2][1:5] <- value.hi95
+
+## regression model for final forecast
+model.lm.thanks.value.final <- lm(value ~ Year , data=thanks.value)
+fcst.empty <- data.table(Year = c(2016,2017,2018,2019,2020)
+        , value = 0)
+fcst.lm.thanks.value.final <- forecast(model.lm.thanks.value, h = 5, 
+        newdata = fcst.empty)
+
+
+## take means of forecasts and intervals to calculate ensemble forecasts
+point <- hi80 <- lo80 <- hi95 <- lo95 <- NULL
+
+for(i in 1:5){        
+        
+        value <- mean(c(as.numeric(fcst.ets.thanks.value.final$mean[i])
+                        , as.numeric(fcst.arima.thanks.value.final$mean[i]) 
+                        , as.numeric(model.meanf.thanks.value.final$mean[i])
+                        , as.numeric(fcst.lm.thanks.value.final$mean[i])))
+
+
+        value_lo80 <- mean(c(as.numeric(fcst.ets.thanks.value.final$lower[i,1])
+                             , as.numeric(fcst.arima.thanks.value.final$lower[i,1])
+                             , as.numeric(model.meanf.thanks.value.final$lower[i,1])
+                             , as.numeric(fcst.lm.thanks.value.final$lower[i,1])))
+
+        value_hi80 <- mean(c(as.numeric(fcst.ets.thanks.value.final$upper[i,1])
+                             , as.numeric(fcst.arima.thanks.value.final$upper[i,1])
+                             , as.numeric(model.meanf.thanks.value.final$upper[i,1])
+                             , as.numeric(fcst.lm.thanks.value.final$upper[i,1])))
+        
+        value_lo95 <- mean(c(as.numeric(fcst.ets.thanks.value.final$lower[i,2])
+                             , as.numeric(fcst.arima.thanks.value.final$lower[i,2])
+                             , as.numeric(model.meanf.thanks.value.final$lower[i,2])
+                             , as.numeric(fcst.lm.thanks.value.final$lower[i,2])))
+
+        value_hi95 <- mean(c(as.numeric(fcst.ets.thanks.value.final$upper[i,2])
+                             , as.numeric(fcst.arima.thanks.value.final$upper[i,2])
+                             , as.numeric(model.meanf.thanks.value.final$upper[i,2])
+                             , as.numeric(fcst.lm.thanks.value.final$upper[i,2])))
+        
+        point <- c(point, value)
+        lo80 <- c(lo80, value_lo80)
+        hi80 <- c(hi80, value_hi80)
+        lo95 <- c(lo95, value_lo95)
+        hi95 <- c(hi95, value_hi95)   
+}
+
+## pack the forecast values calculated into the meanf model of values
+fcst.thanks.final <- model.meanf.thanks.value.final
+fcst.thanks.final[[5]][1:5] <- point
+fcst.thanks.final[[6]][,1][1:5] <- lo80
+fcst.thanks.final[[7]][,1][1:5] <- hi80
+fcst.thanks.final[[6]][,2][1:5] <- lo95
+fcst.thanks.final[[7]][,2][1:5] <- hi95
+
+## plot forecast model of thanksgiving dinner costs, with orange line for
+## actuals, and blue line for forecast
+plot(fcst.thanks.final, col = "darkorange", lwd = 2,
+        main = "Fig. 15: Forecast of Thanksgiving Prices - Final", 
+        xlab = "Year", 
+        ylab = "Dollars")
+
+## make coordinates relative
+par(usr = c(0, 1, 0, 1))
+
+## build and display legend
+legend(0.03, 0.87, c("Cost", "Forecast", "80% PI", "95% PI"),
+       lty=c(1,1), lwd=c(3,3,3,3), , inset = .05,
+       col=c("darkorange", "blue", "darkgray", "lightgray"))
+
+## diplay text on plot indicating data source
+text(0.55, 0.03, "Data: American Farm Bureau Federation", cex = 0.75, adj = 0)
+
+## restore original user coordinate
+par(usr = usr)
+
+## build and display a table of the forecasts and prediction intervals
+fcst.thanks.table <- data.table(Year = c("2016","2017","2018","2019","2020")
+        , Point_Forecast = point, Low_80 = lo80, High_80 = hi80, 
+        Low_95 = lo95, High_95 = hi95)
+print(xtable(fcst.thanks.table),include.rownames = FALSE,type="html")
+```
+
+<br> 
+
+My forecast for the cost of Thanksgiving Dinner in 2016 is $50.57, which is 46 cents higher than 2015 and represents a modest increase of 0.9%. There is an 80% probability that the cost will be between $47.89 and $53.79 and a 95% probability that it will be between $46.27 and $55.41. For my past forecasts of Thanksgiving Dinner costs I only predicted the cost one year ahead, but this time I have predicted the cost out five years. So looking out all the way to 2020 I am forecasting a 8.5% increase and $54.36 for Thanksgiving Dinner. This far out there is a lot of uncertainty though and my prediction intervals grow to account for this. That wraps up my attemt at forecasting Thanksgiving Dinner costs for 2016 and beyond. 
+
+
+<br> 
+
+#### Works Cited
+
+Mishkin, Frederic S.. [*The Economics of Money, Banking, and Financial Markets*](http://www.amazon.com/gp/product/0321287266?ie=UTF8&tag=realizresona-20&linkCode=as2&camp=1789&creative=9325&creativeASIN=0321287266). Eighth Edition. Boston: Pearson Addison Wesley, 2007. Print. 
+
+Mulvany, Lydia, Lin Linley and Megan Durisin. ["Thanksgiving Turkeys Cost More Than Ever After Bird Flu Wipeout"](http://www.bloomberg.com/news/articles/2015-11-12/thanksgiving-turkeys-cost-more-than-ever-after-bird-flu-wipeout). *Bloomberg.com*. 12 Nov. 2015. Web. 10 Dec. 2015.
+
+Sullivan, Paul. ["In the Labyrinth of Turkey Pricing, a Reason Under Every Giblet"](http://www.nytimes.com/2011/11/19/your-money/a-primer-to-calculate-turkey-prices.html). *NYTimes.com*, 2011 Nov. 18. Web. 10 Dec. 2015.
+
+["Thanksgiving Dinner Up a Tad, to Just Over $50"](http://www.fb.org/newsroom/news_article/369/). *American Farm Bureau Federation (AFBF)*. Contacts: Kari Barbic and Cyndie Shearing. 19 Nov. 2015. Web. 10 Dec. 2015.
+
+Westhoff, Patrick. [*The Economics of Food: How Feeding and Fueling the Planet Affects Good Prices*](http://www.amazon.com/gp/product/0137006101?ie=UTF8&tag=realizresona-20&linkCode=as2&camp=1789&creative=9325&creativeASIN=0137006101). Upper Saddle River, NJ: Pearson Education, Inc., 2010. Print.
+
+["Where Do Turkeys Come From? Let's Find Out Using Power BI"](http://blogs.msdn.com/b/powerbi/archive/2013/11/27/where-do-turkeys-come-from-let-s-find-out-using-power-bi.aspx). *Microsoft Power BI, MSDN*.  27 Nov. 2013. Web. 10 Dec. 2015.
+
+
+
+
