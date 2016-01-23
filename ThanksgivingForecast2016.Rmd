@@ -7,7 +7,7 @@ output:
     keep_md: yes
 ---
 
-<div style="width:450px; height=300px">
+<div style="width:300px; height=200px">
 ![Image courtesy of iStock](ThanksgivingForecast2016_files\figure-html\iStock_000077928943_Small_ThanksgivingDinner2016.jpg)
 </div>
 
