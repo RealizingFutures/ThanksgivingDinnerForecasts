@@ -954,5 +954,10 @@ Westhoff, Patrick. [*The Economics of Food: How Feeding and Fueling the Planet A
 ["Where Do Turkeys Come From? Let's Find Out Using Power BI"](http://blogs.msdn.com/b/powerbi/archive/2013/11/27/where-do-turkeys-come-from-let-s-find-out-using-power-bi.aspx). *Microsoft Power BI, MSDN*.  27 Nov. 2013. Web. 10 Dec. 2015.
 
 
+<br> 
 
+#### R Code
+
+You can view the R code used to compile this analaysis and forecast at the following link:
+[RealizingFutures/ThanksgivingDinnerForecasts on GitHub](https://github.com/RealizingFutures/ThanksgivingDinnerForecasts/tree/gh-pages)
 
