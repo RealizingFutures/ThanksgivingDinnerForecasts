@@ -190,7 +190,7 @@ y <- data.thanks.annual[series_name == "Thanksgiving"]$value
 plot(x, y, type = "l", col = "darkorange", lwd = 2,
      main = "Fig. 1: The Cost of Thanksgiving Dinner" , 
      xlab = "Year", 
-     ylab = "Dollars)")
+     ylab = "Dollars")
 
 ## make coordinates relative
 par(usr = c(0, 1, 0, 1))
