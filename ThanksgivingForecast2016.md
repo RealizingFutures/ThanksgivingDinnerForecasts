@@ -3,7 +3,8 @@ Jared Roy Endicott
 January 22, 2016  
 
 
-![Image courtesy of iStock](ThanksgivingForecast2016_files\figure-html\iStock_000077928943_Small_ThanksgivingDinner2016.jpg)
+<img src="https://raw.githubusercontent.com/RealizingFutures/ThanksgivingDinnerForecasts/gh-pages/ThanksgivingForecast2016_files/figure-html/iStock_000077928943_Small_ThanksgivingDinner2016.jpg">
+<br>
 
 
 #### Introduction
@@ -170,7 +171,7 @@ The final model that I am utilizing is a simple linear regression. This method m
 Now that I have tested a few models against hold-out sample data, I have decided to use all four models and average the output for a final forecast model. To do this I will use the four model approaches above, Exponential Smoothing, ARIMA, Mean Inflation Rate, and Simple Linear Regression, but I will reapply these models to the full time series for Thanksgiving Dinner. This means I will build the models using the data from 1986 through 2015 and then forecast the next five years out, 2016 through 2020. The final forecast will be the mean of the four individual forecasts, and the 80% and 95% prediction intervals will also be the means of the outcomes from the four forecast models. See Fig. 14 for a visual display of this final forecast. The reason I decided to take a simple mean of the four forecast models, rather than a weighted average, is because the past performance of these methods/models does not necessarily tell me which ones will be better or worse performers in the future. Given this a simple average provides a diverse selection. I have written more about the benefits of combining diverse forecasts in the article, "<a href="http://en.paperblog.com/macroeconomic-forecasting-with-diverse-predictions-501592/" target="_blank">Macroeconomic Forecasting with Diverse Predictions</a>." 
 
 ![](ThanksgivingForecast2016_files/figure-html/unnamed-chunk-19-1.png) <!-- html table generated in R 3.2.0 by xtable 1.8-0 package -->
-<!-- Sat Jan 23 14:51:26 2016 -->
+<!-- Sat Jan 23 22:06:15 2016 -->
 <table border=1>
 <tr> <th> Year </th> <th> Point_Forecast </th> <th> Low_80 </th> <th> High_80 </th> <th> Low_95 </th> <th> High_95 </th>  </tr>
   <tr> <td> 2016 </td> <td align="right"> 50.57 </td> <td align="right"> 47.89 </td> <td align="right"> 53.79 </td> <td align="right"> 46.27 </td> <td align="right"> 55.41 </td> </tr>

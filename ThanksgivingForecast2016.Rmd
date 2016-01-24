@@ -8,7 +8,8 @@ output:
 ---
 
 
-![Image courtesy of iStock](ThanksgivingForecast2016_files\figure-html\iStock_000077928943_Small_ThanksgivingDinner2016.jpg)
+<img src="https://raw.githubusercontent.com/RealizingFutures/ThanksgivingDinnerForecasts/gh-pages/ThanksgivingForecast2016_files/figure-html/iStock_000077928943_Small_ThanksgivingDinner2016.jpg">
+<br>
 
 
 #### Introduction
